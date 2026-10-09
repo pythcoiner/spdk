@@ -11,6 +11,22 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey, Signing, Verification};
 
 use crate::Error;
 
+#[cfg(not(feature = "miniscript_13"))]
+compile_error!("A miniscript backend must be selected with a feature flag");
+
+// The miniscript release the backend is built on, for callers that need its
+// concrete types (key expressions, bip32).
+#[cfg(feature = "miniscript_13")]
+pub use mscript_13 as miniscript;
+
+pub mod rust_miniscript;
+
+pub type Active = crate::backend::rust_miniscript::Miniscript;
+
+pub type DescriptorSecretKey = <Active as Backend>::DescriptorSecretKey;
+pub type DescriptorPublicKey = <Active as Backend>::DescriptorPublicKey;
+pub type KeySource = <Active as Backend>::KeySource;
+
 pub trait Backend {
     /// A private key expression (WIF or xprv, with origin and derivation).
     type DescriptorSecretKey: Clone + Eq + Debug + Display + FromStr<Err: Display>;

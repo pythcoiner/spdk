@@ -12,7 +12,7 @@ use core::str::FromStr;
 use secp256k1::{PublicKey, SecretKey};
 use silentpayments::{Network as SpNetwork, SpVersion};
 
-use miniscript::bitcoin::bech32::{self, Bech32m, Hrp};
+use bech32::{Bech32m, Hrp};
 
 /// The HRP for spscan keys on mainnet.
 const SPSCAN_MAINNET_HRP: &str = "spscan";

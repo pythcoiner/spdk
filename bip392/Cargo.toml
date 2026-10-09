@@ -8,7 +8,13 @@ repository.workspace = true
 crate-type = ["lib"]
 
 [dependencies]
+bech32 = "0.11"
 secp256k1.workspace = true
 silentpayments.workspace = true
 
-miniscript.workspace = true
+# miniscript backends, a single one must be selected
+mscript_13 = { version = "13.0", package = "miniscript", optional = true }
+
+[features]
+default = ["miniscript_13"]
+miniscript_13 = ["dep:mscript_13"]

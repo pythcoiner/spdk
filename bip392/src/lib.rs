@@ -26,13 +26,6 @@
 use core::fmt;
 use core::str::FromStr;
 
-pub use miniscript::Error;
-use miniscript::bitcoin::bip32::{self, ChildNumber, DerivationPath, Fingerprint};
-use miniscript::descriptor::Wildcard;
-pub use miniscript::descriptor::{
-    DescriptorPublicKey, DescriptorSecretKey, SinglePubKey, checksum,
-};
-pub use miniscript::expression::{self, FromTree};
 use secp256k1::{PublicKey, SecretKey};
 use silentpayments::Network as SpNetwork;
 
@@ -40,6 +33,28 @@ pub mod backend;
 mod keys;
 
 pub use self::keys::{SpKey, SpScanKey, SpSpendKey};
+use crate::backend::{Active, Backend, KeySource};
+pub use crate::backend::{DescriptorPublicKey, DescriptorSecretKey, miniscript};
+
+/// An error when parsing or building an `sp()` descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// The descriptor checksum is malformed or does not match.
+    Checksum(String),
+    /// Any other invalid descriptor or key expression.
+    Unexpected(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::Checksum(e) => write!(f, "sp() checksum: {e}"),
+            Error::Unexpected(e) => f.write_str(e),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// A silent payment descriptor.
 ///
@@ -73,7 +88,7 @@ enum SpInner {
     /// key (`0h/0`).
     Encoded {
         /// Optional key origin (`[fingerprint/path]`).
-        origin: Option<bip32::KeySource>,
+        origin: Option<KeySource>,
         /// The encoded silent payment key.
         key: SpKey,
     },
@@ -93,7 +108,7 @@ pub enum DescriptorSpendKey {
 }
 
 impl Sp {
-    fn from_encoded(origin: Option<bip32::KeySource>, key: SpKey) -> Self {
+    fn from_encoded(origin: Option<KeySource>, key: SpKey) -> Self {
         Sp {
             inner: SpInner::Encoded { origin, key },
         }
@@ -132,13 +147,7 @@ impl Sp {
     pub fn is_mainnet(&self) -> bool {
         match &self.inner {
             SpInner::Encoded { key, .. } => key.network() == SpNetwork::Mainnet,
-            SpInner::TwoKey(keys) => match keys.scan() {
-                DescriptorSecretKey::Single(sk) => sk.key.network.is_mainnet(),
-                DescriptorSecretKey::XPrv(xprv) => xprv.xkey.network.is_mainnet(),
-                DescriptorSecretKey::MultiXPrv(_) => {
-                    unreachable!("sp() does not support multipath keys")
-                }
-            },
+            SpInner::TwoKey(keys) => Active::is_mainnet(keys.scan()),
         }
     }
 
@@ -182,17 +191,17 @@ impl TwoKey {
     /// Rejects keys that cannot be materialized and stores the derived keys.
     fn new(scan: DescriptorSecretKey, spend: DescriptorSpendKey) -> Result<Self, Error> {
         let secp = secp256k1::Secp256k1::new();
-        let scan_secret = derive_secret_key(&secp, &scan)?;
+        let scan_secret = Active::derive_secret_key(&secp, &scan)?;
         let spend_secret: Option<SecretKey>;
         let spend_pubkey: PublicKey;
         match spend {
             DescriptorSpendKey::Private(ref desc) => {
-                let secret = derive_secret_key(&secp, &desc)?;
+                let secret = Active::derive_secret_key(&secp, desc)?;
                 spend_pubkey = secret.public_key(&secp);
                 spend_secret = Some(secret);
-            },
+            }
             DescriptorSpendKey::Public(ref desc) => {
-                spend_pubkey = derive_pubkey(&secp, &desc)?;
+                spend_pubkey = Active::derive_public_key(&secp, desc)?;
                 spend_secret = None;
             }
         };
@@ -227,76 +236,8 @@ impl TwoKey {
     }
 }
 
-fn derive_secret_key<C: secp256k1::Signing>(
-    secp: &secp256k1::Secp256k1<C>,
-    descriptor_secret_key: &DescriptorSecretKey,
-) -> Result<SecretKey, Error> {
-    let secret = match descriptor_secret_key {
-        DescriptorSecretKey::MultiXPrv(_) => {
-            return Err(Error::Unexpected(
-                "sp() spend key must not be multipath".to_string(),
-            ));
-        }
-        DescriptorSecretKey::XPrv(xprv) => {
-            if xprv.wildcard != Wildcard::None {
-                return Err(Error::Unexpected(
-                    "sp() spend key must not contain a wildcard".to_string(),
-                ));
-            }
-            xprv.xkey
-                .derive_priv(secp, &xprv.derivation_path)
-                .map(|derived| derived.private_key)
-                .map_err(|e| Error::Unexpected(format!("sp() spend key: {e}")))?
-        }
-        DescriptorSecretKey::Single(s) if !s.key.compressed => {
-            return Err(Error::Unexpected(
-                "sp() spend key must be compressed".to_string(),
-            ));
-        }
-        DescriptorSecretKey::Single(s) => s.key.inner,
-    };
-    Ok(secret)
-}
-
-fn derive_pubkey<C: secp256k1::Verification>(
-    secp: &secp256k1::Secp256k1<C>,
-    descriptor_pubkey: &DescriptorPublicKey,
-) -> Result<PublicKey, Error> {
-    let pubkey = match descriptor_pubkey {
-        DescriptorPublicKey::MultiXPub(_) => Err(Error::Unexpected(
-            "sp() spend key must not be multipath".to_string(),
-        )),
-        DescriptorPublicKey::XPub(xpub) => {
-            if xpub.wildcard != Wildcard::None {
-                return Err(Error::Unexpected(
-                    "sp() spend key must not contain a wildcard".to_string(),
-                ));
-            }
-            if descriptor_pubkey.has_hardened_step() {
-                return Err(Error::Unexpected(
-                    "sp() public spend key cannot use a hardened derivation step".to_string(),
-                ));
-            }
-            xpub.xkey
-                .derive_pub(secp, &xpub.derivation_path)
-                .map(|derived| derived.public_key)
-                .map_err(|e| Error::Unexpected(format!("sp() spend key: {e}")))
-        }
-        DescriptorPublicKey::Single(s) => match s.key {
-            SinglePubKey::FullKey(full) if !full.compressed => Err(Error::Unexpected(
-                "sp() spend key must be compressed".to_string(),
-            )),
-            SinglePubKey::FullKey(full) => Ok(full.inner),
-            SinglePubKey::XOnly(_) => Err(Error::Unexpected(
-                "sp() spend key must be compressed".to_string(),
-            )),
-        },
-    }?;
-    Ok(pubkey)
-}
-
 /// Splits a leading `[fingerprint/path]` off a key expression.
-fn split_key_origin(s: &str) -> Result<(&str, Option<bip32::KeySource>), Error> {
+fn split_key_origin(s: &str) -> Result<(&str, Option<KeySource>), Error> {
     if !s.starts_with('[') {
         return Ok((s, None));
     }
@@ -313,32 +254,21 @@ fn split_key_origin(s: &str) -> Result<(&str, Option<bip32::KeySource>), Error> 
             "sp() key expression contains multiple origins".to_string(),
         ));
     }
-
-    let mut parts = origin.split('/');
-    let fingerprint_hex = parts.next().unwrap_or("");
-    if fingerprint_hex.len() != 8 {
-        return Err(Error::Unexpected(format!(
-            "sp() key origin fingerprint must be 8 hex chars, got '{fingerprint_hex}'"
-        )));
-    }
-    let fingerprint = Fingerprint::from_hex(fingerprint_hex)
-        .map_err(|e| Error::Unexpected(format!("sp() key origin fingerprint: {e}")))?;
-    let children = parts
-        .map(ChildNumber::from_str)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| Error::Unexpected(format!("sp() key origin path: {e}")))?;
-    Ok((key, Some((fingerprint, DerivationPath::from(children)))))
+    Ok((key, Some(Active::parse_key_origin(origin)?)))
 }
 
-fn write_key_origin(f: &mut impl fmt::Write, origin: &bip32::KeySource) -> fmt::Result {
-    f.write_str("[")?;
-    for byte in origin.0.as_bytes() {
-        write!(f, "{byte:02x}")?;
+/// Strips and checks the `#checksum` suffix, when present.
+fn verify_checksum(s: &str) -> Result<&str, Error> {
+    let Some((desc, checksum)) = s.rsplit_once('#') else {
+        return Ok(s);
+    };
+    let expected = Active::checksum(desc)?;
+    if checksum != expected {
+        return Err(Error::Checksum(format!(
+            "invalid checksum '{checksum}', expected '{expected}'"
+        )));
     }
-    for child in &origin.1 {
-        write!(f, "/{child:#}")?;
-    }
-    f.write_str("]")
+    Ok(desc)
 }
 
 impl fmt::Display for DescriptorSpendKey {
@@ -353,20 +283,25 @@ impl fmt::Display for DescriptorSpendKey {
 impl fmt::Display for Sp {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use fmt::Write;
-        let mut wrapped_f = checksum::Formatter::new(f);
+        let mut desc = String::from("sp(");
         match &self.inner {
             SpInner::Encoded { origin, key } => {
-                write!(wrapped_f, "sp(")?;
                 if let Some(origin) = origin {
-                    write_key_origin(&mut wrapped_f, origin)?;
+                    Active::write_key_origin(&mut desc, origin)?;
                 }
-                write!(wrapped_f, "{key})")?;
+                write!(desc, "{key}")?;
             }
             SpInner::TwoKey(keys) => {
-                write!(wrapped_f, "sp({},{})", keys.scan(), keys.spend())?;
+                write!(desc, "{},{}", keys.scan(), keys.spend())?;
             }
         }
-        wrapped_f.write_checksum_if_not_alt()
+        desc.push(')');
+        f.write_str(&desc)?;
+        if !f.alternate() {
+            let checksum = Active::checksum(&desc).map_err(|_| fmt::Error)?;
+            write!(f, "#{checksum}")?;
+        }
+        Ok(())
     }
 }
 
@@ -374,61 +309,44 @@ impl FromStr for Sp {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let expr_tree = expression::Tree::from_str(s)?;
-        Self::from_tree(expr_tree.root())
-    }
-}
-
-impl FromTree for Sp {
-    fn from_tree(root: expression::TreeIterItem) -> Result<Self, Error> {
-        root.verify_toplevel("sp", 1..=2)
-            .map_err(From::from)
-            .map_err(Error::Parse)?;
-
-        let mut children = root.children();
-        let first = children.next().unwrap();
-
-        match root.n_children() {
-            1 => {
-                // Single-argument form: spscan or spspend, optionally with a key origin.
-                if first.n_children() > 0 {
-                    return Err(Error::Unexpected(
-                        "sp() single-argument form expects an spscan or spspend key".to_string(),
-                    ));
-                }
-                let (key_str, origin) = split_key_origin(first.name())?;
-                let key = SpKey::from_str(key_str).map_err(|e| Error::Unexpected(e.to_string()))?;
-                Ok(Sp::from_encoded(origin, key))
-            }
-            2 => {
-                // Two-argument form: private scan key, then spend key.
-                let second = children.next().unwrap();
-                if first.n_children() > 0 {
-                    return Err(Error::Unexpected(
-                        "sp() scan key must be a single private key".to_string(),
-                    ));
-                }
-                let scan = DescriptorSecretKey::from_str(first.name())
-                    .map_err(|e| Error::Unexpected(format!("sp() scan key: {e}")))?;
-                let spend = parse_spend_key(second)?;
-                Sp::from_keys(scan, spend)
-            }
-            _ => unreachable!("verify_toplevel checked 1..=2"),
+        let args = verify_checksum(s)?
+            .strip_prefix("sp(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .ok_or_else(|| Error::Unexpected("expected an sp() descriptor".to_string()))?;
+        if args.contains(['(', ')', '{', '}']) {
+            return Err(Error::Unexpected(
+                "sp() arguments must be key expressions".to_string(),
+            ));
+        }
+        match args.split(',').collect::<Vec<_>>().as_slice() {
+            [key] => parse_encoded(key),
+            [scan, spend] => parse_two_keys(scan, spend),
+            _ => Err(Error::Unexpected(
+                "sp() expects one or two key expressions".to_string(),
+            )),
         }
     }
 }
 
-fn parse_spend_key(node: expression::TreeIterItem) -> Result<DescriptorSpendKey, Error> {
-    if node.n_children() > 0 {
-        return Err(Error::Unexpected(
-            "sp() spend key must be a single key expression".to_string(),
-        ));
-    }
+/// Single-argument form: spscan or spspend, optionally with a key origin.
+fn parse_encoded(s: &str) -> Result<Sp, Error> {
+    let (key_str, origin) = split_key_origin(s)?;
+    let key = SpKey::from_str(key_str).map_err(|e| Error::Unexpected(e.to_string()))?;
+    Ok(Sp::from_encoded(origin, key))
+}
 
-    match DescriptorSecretKey::from_str(node.name()) {
+/// Two-argument form: private scan key, then spend key.
+fn parse_two_keys(scan: &str, spend: &str) -> Result<Sp, Error> {
+    let scan = DescriptorSecretKey::from_str(scan)
+        .map_err(|e| Error::Unexpected(format!("sp() scan key: {e}")))?;
+    Sp::from_keys(scan, parse_spend_key(spend)?)
+}
+
+fn parse_spend_key(s: &str) -> Result<DescriptorSpendKey, Error> {
+    match DescriptorSecretKey::from_str(s) {
         Ok(sk) => Ok(DescriptorSpendKey::Private(sk)),
         Err(_) => {
-            let pk = DescriptorPublicKey::from_str(node.name())
+            let pk = DescriptorPublicKey::from_str(s)
                 .map_err(|e| Error::Unexpected(format!("sp() spend key: {e}")))?;
             Ok(DescriptorSpendKey::Public(pk))
         }
