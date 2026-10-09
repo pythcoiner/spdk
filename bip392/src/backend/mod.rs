@@ -11,11 +11,16 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey, Signing, Verification};
 
 use crate::Error;
 
-#[cfg(not(feature = "miniscript_13"))]
+#[cfg(all(feature = "miniscript_12", feature = "miniscript_13"))]
+compile_error!("A single miniscript backend must be selected");
+
+#[cfg(not(any(feature = "miniscript_12", feature = "miniscript_13")))]
 compile_error!("A miniscript backend must be selected with a feature flag");
 
 // The miniscript release the backend is built on, for callers that need its
 // concrete types (key expressions, bip32).
+#[cfg(feature = "miniscript_12")]
+pub use mscript_12 as miniscript;
 #[cfg(feature = "miniscript_13")]
 pub use mscript_13 as miniscript;
 

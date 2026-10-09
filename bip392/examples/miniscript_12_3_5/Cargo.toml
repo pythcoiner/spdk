@@ -1,0 +1,16 @@
+[package]
+name = "bip392-example-miniscript-12-3-5"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: a directory under a workspace member cannot be excluded.
+[workspace]
+
+[dependencies]
+miniscript = "=12.3.5"
+bip392 = { path = "../..", default-features = false, features = ["miniscript_12"] }
+
+[[bin]]
+name = "roundtrip"
+path = "../shared/roundtrip.rs"

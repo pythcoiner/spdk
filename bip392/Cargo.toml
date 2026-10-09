@@ -13,8 +13,10 @@ secp256k1.workspace = true
 silentpayments.workspace = true
 
 # miniscript backends, a single one must be selected
+mscript_12 = { version = "12.0", package = "miniscript", optional = true }
 mscript_13 = { version = "13.0", package = "miniscript", optional = true }
 
 [features]
 default = ["miniscript_13"]
+miniscript_12 = ["dep:mscript_12"]
 miniscript_13 = ["dep:mscript_13"]
