@@ -36,6 +36,7 @@ pub use miniscript::expression::{self, FromTree};
 use secp256k1::{PublicKey, SecretKey};
 use silentpayments::Network as SpNetwork;
 
+pub mod backend;
 mod keys;
 
 pub use self::keys::{SpKey, SpScanKey, SpSpendKey};
